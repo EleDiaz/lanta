@@ -1,21 +1,19 @@
-use std::fmt;
 use std::collections::HashMap;
+use std::fmt;
+
+use log::{error, info, log};
 
 use xcb;
-use xcb_util::{ewmh, icccm};
 use xcb_util::keysyms::KeySymbols;
+use xcb_util::{ewmh, icccm};
 
-use errors::*;
-use keys::{KeyCombo, KeyHandlers};
-use groups::Group;
-use stack::Stack;
-
+use crate::errors::*;
+use crate::keys::{KeyCombo, KeyHandlers};
 
 pub use self::ewmh::StrutPartial;
 
-
 /// A handle to an X Window.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone, Eq, Hash)]
 pub struct WindowId(xcb::Window);
 
 impl WindowId {
@@ -29,7 +27,6 @@ impl fmt::Display for WindowId {
         write!(f, "{}", self.0)
     }
 }
-
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum WindowType {
@@ -49,7 +46,6 @@ pub enum WindowType {
     Normal,
 }
 
-
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum WindowState {
     Modal,
@@ -65,7 +61,6 @@ pub enum WindowState {
     Below,
     DemandsAttention,
 }
-
 
 macro_rules! atoms {
     ( $( $name:ident ),+ ) => {
@@ -90,9 +85,7 @@ macro_rules! atoms {
     ( $( $name:ident ),+ , ) => (atoms!($( $name ),+);)
 }
 
-
 atoms!(WM_DELETE_WINDOW, WM_PROTOCOLS,);
-
 
 pub struct Connection {
     conn: ewmh::Connection,
@@ -103,14 +96,14 @@ pub struct Connection {
     window_state_lookup: HashMap<xcb::Atom, WindowState>,
 }
 
-
 impl Connection {
     /// Opens a connection to the X server, returning a new Connection object.
     pub fn connect() -> Result<Connection> {
         let (conn, screen_idx) =
             xcb::Connection::connect(None).chain_err(|| "Failed to connect to X server")?;
         let conn = ewmh::Connection::connect(conn).map_err(|(e, _)| e)?;
-        let root = conn.get_setup()
+        let root = conn
+            .get_setup()
             .roots()
             .nth(screen_idx as usize)
             .ok_or("Invalid screen")?
@@ -178,16 +171,25 @@ impl Connection {
     /// If there is already a window manager on the display, then this will
     /// fail.
     pub fn install_as_wm(&self, key_handlers: &KeyHandlers) -> Result<()> {
-        let values = [
-            (
-                xcb::CW_EVENT_MASK,
-                xcb::EVENT_MASK_SUBSTRUCTURE_NOTIFY | xcb::EVENT_MASK_SUBSTRUCTURE_REDIRECT,
-            ),
-        ];
+        let values = [(
+            xcb::CW_EVENT_MASK,
+            xcb::EVENT_MASK_SUBSTRUCTURE_NOTIFY
+                | xcb::EVENT_MASK_SUBSTRUCTURE_REDIRECT
+                | xcb::EVENT_MASK_BUTTON_MOTION
+                | xcb::EVENT_MASK_POINTER_MOTION,
+            //| xcb::EVENT_MASK_ENTER_WINDOW
+            //| xcb::EVENT_MASK_LEAVE_WINDOW
+            //| xcb::EVENT_MASK_STRUCTURE_NOTIFY
+            //| xcb::EVENT_MASK_BUTTON_PRESS
+            //| xcb::EVENT_MASK_BUTTON_RELEASE
+            //| xcb::EVENT_MASK_FOCUS_CHANGE
+            //| xcb::EVENT_MASK_PROPERTY_CHANGE
+        )];
         xcb::change_window_attributes_checked(&self.conn, self.root.to_x(), &values)
             .request_check()
             .or(Err("Could not register SUBSTRUCTURE_NOTIFY/REDIRECT"))?;
 
+        self.enable_grab_pointer(&self.root);
         self.enable_window_key_events(&self.root, key_handlers);
 
         Ok(())
@@ -198,24 +200,10 @@ impl Connection {
         &self.root
     }
 
-    pub fn update_ewmh_desktops(&self, groups: &Stack<Group>) {
-        let group_names = groups.iter().map(|g| g.name());
-        ewmh::set_desktop_names(&self.conn, self.screen_idx, group_names);
-        ewmh::set_number_of_desktops(&self.conn, self.screen_idx, groups.len() as u32);
-
-        // Matching the current group on name isn't perfect, but it's good enough for
-        // EWMH.
-        let focused_idx = groups
-            .focused()
-            .and_then(|focused| groups.iter().position(|g| g.name() == focused.name()));
-        match focused_idx {
-            Some(idx) => {
-                ewmh::set_current_desktop(&self.conn, self.screen_idx, idx as u32);
-            }
-            None => {
-                error!("Invariant: failed to get active group index");
-            }
-        };
+    pub fn update_ewmh_desktops(&self, names: Vec<&str>, focused: usize) {
+        ewmh::set_number_of_desktops(&self.conn, self.screen_idx, names.len() as u32);
+        ewmh::set_desktop_names(&self.conn, self.screen_idx, names);
+        ewmh::set_current_desktop(&self.conn, self.screen_idx, focused as u32);
     }
 
     pub fn top_level_windows(&self) -> Result<Vec<WindowId>> {
@@ -278,7 +266,8 @@ impl Connection {
     /// The window will be closed gracefully using the ICCCM WM_DELETE_WINDOW
     /// protocol if it is supported.
     pub fn close_window(&self, window_id: &WindowId) {
-        let has_wm_delete_window = self.get_wm_protocols(window_id)
+        let has_wm_delete_window = self
+            .get_wm_protocols(window_id)
             .map(|protocols| protocols.contains(&self.atoms.WM_DELETE_WINDOW))
             .unwrap_or(false);
 
@@ -364,13 +353,39 @@ impl Connection {
         }
     }
 
+    pub fn enable_grab_pointer(&self, window_id: &WindowId) {
+        xcb::grab_pointer(
+            &self.conn,
+            false,
+            window_id.to_x(),
+            (xcb::EVENT_MASK_POINTER_MOTION | xcb::EVENT_MASK_BUTTON_MOTION) as u16,
+            xcb::GRAB_MODE_ASYNC as u8,
+            xcb::GRAB_MODE_ASYNC as u8,
+            xcb::NONE,
+            xcb::NONE,
+            xcb::CURRENT_TIME,
+        );
+
+        // xcb::grab_button_checked(&self.conn, true, window_id.to_x(), 0,
+        //  xcb::GRAB_MODE_ASYNC as u8,
+        //  xcb::GRAB_MODE_ASYNC as u8, xcb::NONE, xcb::NONE, xcb::BUTTON_INDEX_ANY as u8, xcb::MOD_MASK_ANY as u16);
+    }
+
     pub fn enable_window_tracking(&self, window_id: &WindowId) {
-        let values = [
-            (
-                xcb::CW_EVENT_MASK,
-                xcb::EVENT_MASK_ENTER_WINDOW | xcb::EVENT_MASK_STRUCTURE_NOTIFY,
-            ),
-        ];
+        let values = [(
+            xcb::CW_EVENT_MASK,
+            xcb::EVENT_MASK_ENTER_WINDOW
+                | xcb::EVENT_MASK_STRUCTURE_NOTIFY
+                | xcb::EVENT_MASK_POINTER_MOTION
+                | xcb::EVENT_MASK_BUTTON_MOTION
+                | xcb::EVENT_MASK_BUTTON_1_MOTION
+                | xcb::EVENT_MASK_BUTTON_2_MOTION
+                | xcb::EVENT_MASK_BUTTON_3_MOTION
+                | xcb::EVENT_MASK_BUTTON_4_MOTION
+                | xcb::EVENT_MASK_BUTTON_5_MOTION
+                | xcb::EVENT_MASK_BUTTON_PRESS
+                | xcb::EVENT_MASK_BUTTON_RELEASE,
+        )];
         xcb::change_window_attributes(&self.conn, window_id.to_x(), &values);
     }
 
@@ -399,7 +414,6 @@ impl Connection {
     }
 }
 
-
 /// Events received from the `EventLoop`.
 pub enum Event {
     MapRequest(WindowId),
@@ -408,7 +422,6 @@ pub enum Event {
     KeyPress(KeyCombo),
     EnterNotify(WindowId),
 }
-
 
 /// An iterator that yields events from the X event loop.
 ///
@@ -426,7 +439,8 @@ impl<'a> Iterator for EventLoop<'a> {
             // have) just yielded.
             self.connection.flush();
 
-            let event = self.connection
+            let event = self
+                .connection
                 .conn
                 .wait_for_event()
                 .expect("wait_for_event() returned None: IO error?");
@@ -439,7 +453,11 @@ impl<'a> Iterator for EventLoop<'a> {
                     xcb::DESTROY_NOTIFY => self.on_destroy_notify(xcb::cast_event(&event)),
                     xcb::KEY_PRESS => self.on_key_press(xcb::cast_event(&event)),
                     xcb::ENTER_NOTIFY => self.on_enter_notify(xcb::cast_event(&event)),
-                    _ => None,
+                    xcb::MOTION_NOTIFY => self.on_motion_notify(xcb::cast_event(&event)),
+                    other => {
+                        info!("Other event {}", other);
+                        None
+                    }
                 };
 
                 if let Some(propagate_event) = propagate {
@@ -455,6 +473,7 @@ impl<'a> EventLoop<'a> {
         // This request is not interesting for us: grant it unchanged.
         // Build a request with all attributes set, then filter out to only include
         // those from the original request.
+        info!("Configure_Requests {}", event.window());
         let values = vec![
             (xcb::CONFIG_WINDOW_X as u16, event.x() as u32),
             (xcb::CONFIG_WINDOW_Y as u16, event.y() as u32),
@@ -481,10 +500,12 @@ impl<'a> EventLoop<'a> {
     }
 
     fn on_map_request(&self, event: &xcb::MapRequestEvent) -> Option<Event> {
+        info!("Map Request {}", event.window());
         Some(Event::MapRequest(WindowId(event.window())))
     }
 
     fn on_unmap_notify(&self, event: &xcb::UnmapNotifyEvent) -> Option<Event> {
+        info!("UnMapNotify {}", event.window());
         // Ignore UnmapNotify events that come from our SUBSTRUCTURE_NOTIFY mask
         // on the root window. We are interested only in the events that come from
         // the windows themselves, which allows our `Connection::disable_window_tracking()`
@@ -509,6 +530,12 @@ impl<'a> EventLoop<'a> {
     }
 
     fn on_enter_notify(&self, event: &xcb::EnterNotifyEvent) -> Option<Event> {
+        info!("UnMapNotify {}", event.event());
         Some(Event::EnterNotify(WindowId(event.event())))
+    }
+
+    fn on_motion_notify(&self, event: &xcb::MotionNotifyEvent) -> Option<Event> {
+        info!("Motion {}", event.event());
+        None
     }
 }

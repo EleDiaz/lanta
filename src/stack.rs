@@ -239,7 +239,7 @@ mod test {
 
     #[test]
     fn test_is_empty() {
-        let stack = Stack::default();
+        let stack : Stack<()> = Stack::default();
         assert_eq!(stack.is_empty(), true);
         let stack = stack_from_pieces(vec![1, 2], vec![]);
         assert_eq!(stack.is_empty(), false);

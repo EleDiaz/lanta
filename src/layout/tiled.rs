@@ -1,7 +1,7 @@
-use layout::Layout;
-use stack::Stack;
-use Viewport;
-use x::{Connection, WindowId};
+use crate::layout::Layout;
+use crate::stack::Stack;
+use crate::Viewport;
+use crate::x::{Connection, WindowId};
 
 
 #[derive(Clone)]

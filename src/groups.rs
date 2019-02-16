@@ -1,9 +1,8 @@
 use std::rc::Rc;
 
-use layout::Layout;
-use stack::Stack;
-use x::{Connection, WindowId};
-use super::Viewport;
+use log::{log, info};
+
+use crate::x::{Connection, WindowId};
 
 
 #[derive(Clone)]
